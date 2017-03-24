@@ -1,3 +1,8 @@
+# To Do: Cognito User Pool and Identity Pool need to be defined, and something
+# like the choiceAsDynamoDBRole assigned to the authenticated role for the Identity Pool.
+# i.e. choiceAsDynamoDBRole doesn't actually do anything at the moment. It feels like
+# DynamoDB is overkill for this project, so I'll tag this commit for future reference
+# and pivot to writing CSVs directly to S3.
 AWSTemplateFormatVersion: "2010-09-09"
 Resources:
   choiceAsSessionDynamoDBTable:
