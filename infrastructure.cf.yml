@@ -1,0 +1,206 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  choiceAsSessionDynamoDBTable:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      TableName: "choice_as_sessions"
+      AttributeDefinitions:
+        -
+          AttributeName: "session_id"
+          AttributeType: "S"
+        -
+          AttributeName: "session_start"
+          AttributeType: "N"
+        -
+          AttributeName: "session_end"
+          AttributeType: "N"
+      KeySchema:
+        -
+          AttributeName: "session_id"
+          KeyType: "HASH"
+        -
+          AttributeName: "session_start"
+          KeyType: "RANGE"
+      ProvisionedThroughput:
+        ReadCapacityUnits: "1"
+        WriteCapacityUnits: "1"
+      StreamSpecification:
+        StreamViewType: "NEW_IMAGE"
+      LocalSecondaryIndexes:
+        -
+          IndexName: "closed_sessions"
+          KeySchema:
+            -
+              AttributeName: "session_id"
+              KeyType: "HASH"
+            -
+              AttributeName: "session_end"
+              KeyType: "RANGE"
+          Projection:
+            ProjectionType: "ALL"
+  choiceAsUpdateEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt choiceAsSessionDynamoDBTable.StreamArn
+      FunctionName: !GetAtt choiceAsUpdateHandleLambda.Arn
+      StartingPosition: TRIM_HORIZON
+    DependsOn:
+      - choiceAsLambdaExecutionRole
+      - choiceAsUpdateHandleLambda
+      - choiceAsSessionDynamoDBTable
+  choiceAsUpdateHandleLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python2.7
+      Handler: index.handler
+      Role: !GetAtt choiceAsLambdaExecutionRole.Arn
+      Code:
+        ZipFile: !Sub
+          - |
+            from __future__ import print_function
+            import boto3
+            import os
+            import sys
+            import uuid
+            import tempfile
+
+
+            s3_client = boto3.client('s3')
+            S3_BUCKET = '${choiceAsS3Bucket}'
+
+
+            def handler(event, context):
+              # only log on update where session is closed
+              try:
+                for r in event['Records']:
+                  csv = tempfile.TemporaryFile()
+
+                  session_id = r[u'dynamodb'][u'NewImage'][u'session_id'][u'S']
+
+                  # for t in r[u'dynamodb'][u'NewImage'][u'trials']
+                  print("Session ID: {}".format(session_id))
+
+                  csv.write('hello world')
+
+                  csv.seek(0)
+
+                  s3_file_name = '{}.csv'.format(session_id)
+                  s3_client.upload_fileobj(csv, S3_BUCKET, s3_file_name)
+
+                  print("Event: {}".format(event))
+
+                  csv.close()
+
+              except KeyError as e:
+                print("KeyError: {}".format(e))
+                # raise
+
+          # define mapping for use by Sub function and ${}
+          - { choiceAsS3Bucket: !Ref choiceAsS3Bucket }
+  choiceAsLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName: choiceAsLambdaPermissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:ap-southeast-2:*:*
+              -
+                Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !GetAtt choiceAsSessionDynamoDBTable.StreamArn
+              -
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Join [ '', [ "arn:aws:s3:::", !Ref choiceAsS3Bucket ] ]
+              -
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Join [ '', [ "arn:aws:s3:::", !Ref choiceAsS3Bucket, "/*" ] ]
+  # To Do: create user pool and identity pool
+  # temporarily updated Cognito_ChoiceAsIdentityPoolAuth_Role
+  choiceAsDynamoDBRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Federated:
+                - cognito-identity.amazonaws.com
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud:
+                  ap-southeast-2:f95305cc-2b48-45dc-8bfa-a77f93b335ab
+
+      Path: /
+      Policies:
+        -
+          PolicyName: choiceAsDynamoDBPermissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource: !Sub
+                  - arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${table}
+                  - { table: !Ref choiceAsSessionDynamoDBTable }
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys:
+                        - ${cognito-identity.amazonaws.com:sub}
+  choiceAsS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: choice-as-sessions
+  choiceAsS3BucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket:
+        Ref: "choiceAsS3Bucket"
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - "s3:GetObject"
+            Effect: "Allow"
+            Resource: !Join [ '', [ "arn:aws:s3:::", !Ref choiceAsS3Bucket, "/*" ] ]
+            Principal: "*"
